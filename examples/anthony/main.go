@@ -1,21 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/Shopify/sarama"
 	"log"
+	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
-	topic = "user_event_dev"
-	group = "anthony_dev_1"
-	host  = "localhost:9092,localhost:9093,localhost:9094"
+	topic    = "Test-Topic-2"
+	group    = "dev-1"
+	host     = "localhost:9191,localhost:9192,localhost:9193"
+	clientId = "GoLang"
 )
 
 func getAddr() []string {
@@ -39,11 +43,16 @@ func (exampleConsumerGroupHandler) Cleanup(_ sarama.ConsumerGroupSession) error 
 }
 func (h exampleConsumerGroupHandler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 	for msg := range claim.Messages() {
-		fmt.Printf("[Consumer] Message topic:%q partition:%d offset:%d add:%d\n", msg.Topic, msg.Partition, msg.Offset, claim.HighWaterMarkOffset()-msg.Offset)
+		fmt.Printf("[Consumer] Message topic:%q partition:%d offset:%d HighWaterMarkOffset:%d\n", msg.Topic, msg.Partition, msg.Offset, claim.HighWaterMarkOffset())
+		sess.MarkMessage(msg, "")
+		//sess.Commit()
 	}
 	return nil
 }
 
+func Main() {
+	fmt.Println(newByte(111))
+}
 func main() {
 	go func() {
 		http.ListenAndServe(":8888", http.DefaultServeMux)
@@ -52,25 +61,46 @@ func main() {
 
 	wg := sync.WaitGroup{}
 	wg.Add(2)
-	//go func() {
-	//	config := newKafkaConfig()
-	//	defer wg.Done()
-	//	producer, err := sarama.NewSyncProducer(getAddr(), config)
-	//	panicError(err)
-	//	buffer := bytes.Buffer{}
-	//	for {
-	//		buffer.Reset()
-	//		time.Sleep(time.Millisecond * 100)
-	//		buffer.WriteString(fmt.Sprintf("curent: %v", time.Now().UnixNano()))
-	//		partition, offset, err := producer.SendMessage(&sarama.ProducerMessage{
-	//			Topic: topic,
-	//			Value: sarama.ByteEncoder(buffer.Bytes()),
-	//		})
-	//		panicError(err)
-	//		fmt.Fprintf(ioutil.Discard, "[Producer] partition: %v, offset: %v, topic: %v\n", partition, offset, topic)
-	//	}
-	//}()
+	producer(&wg)
 
+	consumer(&wg)
+
+	wg.Wait()
+}
+
+func producer(wg *sync.WaitGroup) {
+	go func() {
+		config := newKafkaConfig()
+		defer wg.Done()
+		producer, err := sarama.NewSyncProducer(getAddr(), config)
+		panicError(err)
+		buffer := bytes.Buffer{}
+		for {
+			buffer.Reset()
+			buffer.WriteString(fmt.Sprintf("%v%s", time.Now().UnixNano(), newByte(100)))
+			partition, offset, err := producer.SendMessage(&sarama.ProducerMessage{
+				Topic: topic,
+				Value: sarama.ByteEncoder(buffer.Bytes()),
+			})
+			if err != nil {
+				log.Printf("producer find err: %v", err)
+			}
+			fmt.Printf("[Producer] partition: %v, offset: %v, topic: %v\n", partition, offset, topic)
+			time.Sleep(time.Millisecond * 100)
+		}
+	}()
+}
+
+func newByte(num int) string {
+	builder := strings.Builder{}
+	for x := 0; x < num; x++ {
+		n := rand.Int31n(90-65) + 65
+		builder.WriteByte(byte(n))
+	}
+	return builder.String()
+}
+
+func consumer(wg *sync.WaitGroup) {
 	go func() {
 		config := newKafkaConfig()
 		defer wg.Done()
@@ -84,31 +114,36 @@ func main() {
 			}
 		}()
 		handler := new(exampleConsumerGroupHandler)
-		err = client.Consume(ctx, []string{topic}, handler)
-		panicError(err)
+		for {
+			if err := client.Consume(ctx, []string{topic}, handler); err != nil {
+				log.Printf("consumer find error: %v\n", err)
+			}
+			if ctx.Err() != nil {
+				log.Fatalf("consumer is down: %v\n", ctx.Err())
+				return
+			}
+		}
 
 	}()
-
-	wg.Wait()
 }
 
 func newKafkaConfig() *sarama.Config {
 	config := sarama.NewConfig()
 	// 全局一个config即可
-	config.ClientID = "sarama_demo"
-	config.Version = sarama.V0_11_0_1
+	config.ClientID = clientId
 	// kafka版本号
-	config.Producer.Return.Successes = true
+	config.Version = sarama.V2_1_0_0
 	// 同步必须开启
-	config.Producer.RequiredAcks = sarama.WaitForAll
+	config.Producer.Return.Successes = true
 	// ack=-1
-	config.Metadata.Full = false
+	config.Producer.RequiredAcks = sarama.WaitForAll
 	// 不需要拉取全部配置
-	config.Consumer.Offsets.AutoCommit.Enable = true
+	config.Metadata.Full = false
 	// 自动提交
-	config.Consumer.Offsets.Initial = sarama.OffsetOldest
+	config.Consumer.Offsets.AutoCommit.Enable = true
 	// Defaults to OffsetNewest. 所以这个比较坑，一开始对于一个没有启动过的分支，最好设置一下
-	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRange
+	config.Consumer.Offsets.Initial = sarama.OffsetNewest
 	// rb策略，default BalanceStrategyRange
+	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRange
 	return config
 }
